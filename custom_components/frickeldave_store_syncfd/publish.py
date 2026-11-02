@@ -750,7 +750,9 @@ class PublishService:
 
         # Lesen über die Fassade: Produktstand und Exportbündel entstehen im
         # Speicher der Basis. Hier wird nichts geschrieben.
-        bundle = await self._facade.async_build_export()
+        bundle = await self._facade.async_build_export(
+            catalog_path=CATALOG_PATH, images_path=IMAGES_PATH
+        )
         products = await self._facade.async_products()
         # Archivierte Produkte landen nicht im Katalog: auch ein Store, der nur noch
         # archivierte Produkte enthält, würde den Website-Katalog leeren.
