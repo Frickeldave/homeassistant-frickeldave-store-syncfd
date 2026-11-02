@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import sys
 import tomllib
+import types
 from pathlib import Path
 from typing import Any
 
+import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
@@ -161,3 +164,60 @@ def test_options_flow_class_is_wired() -> None:
         FrickeldaveStoreSyncConfigFlow.async_get_options_flow(entry),
         FrickeldaveStoreSyncOptionsFlow,
     )
+
+
+class _FakeExtensionError(Exception):
+    """Stellvertreter für ``ExtensionError`` der Basis."""
+
+
+def _fake_extension_module(calls: dict[str, Any]) -> types.ModuleType:
+    """Baut ein Basis-Modul mit derselben öffentlichen Form wie Contract 1."""
+
+    class FakeRegistration:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    async def fake_register(_hass: HomeAssistant, registration: Any) -> Any:
+        calls["registration"] = registration.kwargs
+        return registration
+
+    async def fake_unregister(_hass: HomeAssistant, name: str) -> None:
+        calls["unregistered"] = name
+
+    module = types.ModuleType("custom_components.frickeldave_store.extension")
+    module.ExtensionError = _FakeExtensionError
+    module.ExtensionRegistration = FakeRegistration
+    module.async_register_extension = fake_register
+    module.async_unregister_extension = fake_unregister
+    return module
+
+
+async def test_registers_with_base_extension(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setup registriert Contract 1 bei der Basis und meldet sich beim Unload ab."""
+    _install_base(hass)
+
+    calls: dict[str, Any] = {}
+    module = _fake_extension_module(calls)
+    package = types.ModuleType("custom_components.frickeldave_store")
+    package.extension = module
+    monkeypatch.setitem(sys.modules, "custom_components.frickeldave_store", package)
+    monkeypatch.setitem(sys.modules, "custom_components.frickeldave_store.extension", module)
+
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert calls["registration"] == {
+        "name": DOMAIN,
+        "version": VERSION,
+        "contract_version": CONTRACT_VERSION,
+        "features": {},
+    }
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert calls["unregistered"] == DOMAIN

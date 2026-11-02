@@ -5,18 +5,18 @@ registriert ihre Features beim Erweiterungspunkt der Basis (Contract 1) und
 bekommt von dort eine Fassade auf den Store. Die fachlichen Handler für
 ``publish`` und ``import`` entstehen in Arbeitspaket 5/6; dieses Gerüst prüft
 die Basis, nimmt die Registrierung vor, sobald der Erweiterungspunkt vorhanden
-ist, und räumt beim Entladen wieder auf.
+ist, und meldet sich beim Entladen wieder ab.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
-from typing import Final
+from collections.abc import Callable, Coroutine
+from typing import Any, Final
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 
 from .const import (
     BASE_DOMAIN,
@@ -55,7 +55,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def _async_register_with_base(
     hass: HomeAssistant,
-) -> Callable[[], None] | None:
+) -> Callable[[], Coroutine[Any, Any, None]] | None:
     """Registriert die Erweiterung bei der Basis und liefert die Abmeldefunktion.
 
     Der Erweiterungspunkt entsteht in der Basis mit Arbeitspaket 2. Fehlt er
@@ -65,8 +65,10 @@ async def _async_register_with_base(
     """
     try:
         from custom_components.frickeldave_store.extension import (  # type: ignore[import-not-found]
+            ExtensionError,
             ExtensionRegistration,
             async_register_extension,
+            async_unregister_extension,
         )
     except ImportError:
         _LOGGER.warning(
@@ -79,9 +81,24 @@ async def _async_register_with_base(
         return None
 
     registration = ExtensionRegistration(
-        extension_id=DOMAIN,
+        name=DOMAIN,
         version=VERSION,
         contract_version=CONTRACT_VERSION,
         features={},
     )
-    return await async_register_extension(hass, registration)
+    try:
+        await async_register_extension(hass, registration)
+    except ExtensionError as err:
+        raise ConfigEntryError(
+            f"Die Registrierung bei {BASE_DOMAIN} ist fehlgeschlagen: {err}"
+        ) from err
+
+    async def _async_unregister() -> None:
+        try:
+            await async_unregister_extension(hass, DOMAIN)
+        except ExtensionError:
+            # Beim Entladen ist die Abmeldung idempotent; eine bereits
+            # abgemeldete Erweiterung darf den Unload nicht scheitern lassen.
+            _LOGGER.debug("%s war beim Entladen nicht registriert", DOMAIN)
+
+    return _async_unregister
