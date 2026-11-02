@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Frickeldave Store Sync",
+        "description": "The base integration `frickeldave_store` must be set up first; it provides the store, the permissions and the extension point this integration registers with. Repository, branches, workflow and token follow in a later version."
+      }
+    },
+    "abort": {
+      "already_configured": "The integration is already configured.",
+      "base_missing": "The base integration `frickeldave_store` is not set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Frickeldave Store Sync – settings",
+        "description": "Repository, branches, workflow, token and import sources follow in a later version. Saving keeps the current options."
+      }
+    }
+  }
+}

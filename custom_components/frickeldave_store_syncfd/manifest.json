@@ -1,0 +1,14 @@
+{
+  "domain": "frickeldave_store_syncfd",
+  "name": "Frickeldave Store Sync",
+  "after_dependencies": ["http"],
+  "codeowners": ["@Frickeldave"],
+  "config_flow": true,
+  "dependencies": ["frickeldave_store"],
+  "documentation": "https://github.com/Frickeldave/homeassistant-frickeldave-store-syncfd",
+  "integration_type": "service",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/Frickeldave/homeassistant-frickeldave-store-syncfd/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

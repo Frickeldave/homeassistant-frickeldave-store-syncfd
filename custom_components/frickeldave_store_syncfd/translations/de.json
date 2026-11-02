@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Frickeldave Store Sync einrichten",
+        "description": "Die Basis-Integration `frickeldave_store` muss zuerst eingerichtet sein; sie liefert Store, Rechte und den Erweiterungspunkt, bei dem sich diese Integration registriert. Repository, Branches, Workflow und Token folgen in einer späteren Version."
+      }
+    },
+    "abort": {
+      "already_configured": "Die Integration ist bereits eingerichtet.",
+      "base_missing": "Die Basis-Integration `frickeldave_store` ist nicht eingerichtet."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Frickeldave Store Sync – Einstellungen",
+        "description": "Repository, Branches, Workflow, Token und Importquellen folgen in einer späteren Version. Speichern behält die aktuellen Optionen bei."
+      }
+    }
+  }
+}
