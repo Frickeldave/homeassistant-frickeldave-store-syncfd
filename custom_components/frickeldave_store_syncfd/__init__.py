@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Any, Final
+from typing import Final
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -30,11 +30,6 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: Final[list[str]] = []
-
-
-async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
-    """YAML-Konfiguration gibt es nicht; eingerichtet wird über den Config Flow."""
-    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
