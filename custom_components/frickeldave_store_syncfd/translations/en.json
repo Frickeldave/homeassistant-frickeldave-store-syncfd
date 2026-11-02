@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Set up Frickeldave Store Sync",
-        "description": "The base integration `frickeldave_store` must be set up first; it provides the store, the permissions and the extension point this integration registers with. Repository, branches, workflow and token follow in a later version."
+        "description": "The base integration `frickeldave_store` must be set up first; it provides the store, the permissions and the extension point this integration registers with. Repository, branches, workflow and token can be changed in the options afterwards."
       }
     },
     "abort": {
@@ -15,8 +15,33 @@
     "step": {
       "init": {
         "title": "Frickeldave Store Sync – settings",
-        "description": "Repository, branches, workflow, token and import sources follow in a later version. Saving keeps the current options."
+        "description": "Publications always commit to the integration branch; `main` is only updated by the production workflow. The token is stored write-only and never shown again.",
+        "data": {
+          "repository": "Website repository (owner/name)",
+          "dev_branch": "Integration branch (dev)",
+          "prod_branch": "Production branch (main)",
+          "prod_workflow": "Production workflow (fd-deploy-prd.yml)",
+          "token": "GitHub token",
+          "catalog_url": "Catalogue URL for the import",
+          "image_base_url": "Image base URL for the import"
+        },
+        "data_description": {
+          "repository": "Repository that receives the catalogue and product images. Commits go to the integration branch.",
+          "dev_branch": "Branch for publications. A commit here triggers fd-ci and fd-deploy-dev.",
+          "prod_branch": "Branch the production workflow promotes to. Direct commits are not allowed.",
+          "prod_workflow": "Workflow that promotes dev to main and deploys production.",
+          "token": "Fine-grained token with Contents: write and Actions: write. Never returned, logged or exported. Leave empty to keep the stored token.",
+          "catalog_url": "Only https hosts from the allowlist are permitted (frickeldave.de, raw.githubusercontent.com).",
+          "image_base_url": "Base URL of the product images; same allowlist as the catalogue."
+        }
       }
+    },
+    "error": {
+      "invalid_repository": "The repository must use the form owner/name.",
+      "invalid_branch": "The branch must not be empty and must not contain spaces.",
+      "invalid_workflow": "The workflow must be a file name such as fd-deploy-prd.yml.",
+      "invalid_source_url": "The catalogue URL must be an https URL on the allowlist (frickeldave.de, raw.githubusercontent.com).",
+      "invalid_image_url": "The image URL must be an https URL on the allowlist (frickeldave.de, raw.githubusercontent.com)."
     }
   }
 }

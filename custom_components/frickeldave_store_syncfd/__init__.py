@@ -1,23 +1,23 @@
 """Setup der Erweiterung ``frickeldave_store_syncfd``.
 
 Die Erweiterung ist ohne die Basis ``frickeldave_store`` funktionslos. Sie
-registriert ihre Features beim Erweiterungspunkt der Basis (Contract 1) und
-bekommt von dort eine Fassade auf den Store. Die fachlichen Handler für
-``publish`` und ``import`` entstehen in Arbeitspaket 5/6; dieses Gerüst prüft
-die Basis, nimmt die Registrierung vor, sobald der Erweiterungspunkt vorhanden
-ist, und meldet sich beim Entladen wieder ab.
+prüft die Basis und den Erweiterungspunkt (Contract 1), registriert dort die
+Features ``publish`` und ``import`` und meldet sich beim Entladen wieder ab.
+Fehlt die Basis oder passt der Vertrag nicht, scheitert das Setup mit einer
+deutschen Meldung als ``ConfigEntryNotReady``.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Coroutine
-from typing import Any, Final
+from functools import partial
+from typing import Final
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 
+from .base_api import BaseApi, BaseUnavailable, load_base_api
 from .const import (
     BASE_DOMAIN,
     CONTRACT_VERSION,
@@ -26,6 +26,8 @@ from .const import (
     NAME,
     VERSION,
 )
+from .features import build_features
+from .settings import SyncSettings
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,17 +35,48 @@ PLATFORMS: Final[list[str]] = []
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Prüft die Basis und registriert die Erweiterung beim Erweiterungspunkt."""
+    """Basis prüfen und die Features beim Erweiterungspunkt registrieren."""
     if BASE_DOMAIN not in hass.config.components:
         raise ConfigEntryNotReady(
             f"Die Basis-Integration {BASE_DOMAIN} ist nicht eingerichtet. "
             f"{NAME} benötigt sie, bevor die Erweiterung starten kann."
         )
 
-    unregister = await _async_register_with_base(hass)
-    if unregister is not None:
-        entry.async_on_unload(unregister)
+    try:
+        api = load_base_api()
+    except BaseUnavailable as err:
+        raise ConfigEntryNotReady(str(err)) from err
 
+    if api.contract_version != CONTRACT_VERSION:
+        if api.contract_version < MIN_BASE_CONTRACT_VERSION:
+            detail = (
+                f"Die Basis spricht Vertrag {api.contract_version}, diese Erweiterung "
+                f"benötigt mindestens Vertrag {MIN_BASE_CONTRACT_VERSION}."
+            )
+        else:
+            detail = (
+                f"Die Basis spricht Vertrag {api.contract_version}, diese Erweiterung "
+                f"unterstützt Vertrag {CONTRACT_VERSION}. Bitte die Erweiterung "
+                "aktualisieren."
+            )
+        raise ConfigEntryNotReady(detail)
+
+    features = build_features(api, lambda: SyncSettings.from_entry(entry))
+    registration = api.registration(
+        name=DOMAIN,
+        version=VERSION,
+        contract_version=CONTRACT_VERSION,
+        features=features,
+    )
+    try:
+        await api.register(hass, registration)
+    except Exception as err:
+        raise ConfigEntryError(
+            f"Die Registrierung bei {BASE_DOMAIN} ist fehlgeschlagen: {err}"
+        ) from err
+
+    entry.async_on_unload(partial(_async_unregister, api, hass))
+    entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     _LOGGER.debug("%s %s eingerichtet", NAME, VERSION)
     return True
 
@@ -53,52 +86,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
-async def _async_register_with_base(
-    hass: HomeAssistant,
-) -> Callable[[], Coroutine[Any, Any, None]] | None:
-    """Registriert die Erweiterung bei der Basis und liefert die Abmeldefunktion.
+async def _async_unregister(api: BaseApi, hass: HomeAssistant) -> None:
+    """Abmeldung beim Erweiterungspunkt; beim Entladen idempotent."""
 
-    Der Erweiterungspunkt entsteht in der Basis mit Arbeitspaket 2. Fehlt er
-    noch, startet das Gerüst ohne Registrierung weiter, damit die Erweiterung
-    installierbar und prüfbar bleibt. Arbeitspaket 5 ersetzt den leeren
-    ``features``-Satz durch die Handler für ``publish`` und ``import``.
-    """
     try:
-        from custom_components.frickeldave_store.extension import (  # type: ignore[import-not-found]
-            ExtensionError,
-            ExtensionRegistration,
-            async_register_extension,
-            async_unregister_extension,
-        )
-    except ImportError:
-        _LOGGER.warning(
-            "Die Basis %s stellt den Erweiterungspunkt (Contract %s) noch nicht "
-            "bereit; %s startet ohne registrierte Features.",
-            BASE_DOMAIN,
-            MIN_BASE_CONTRACT_VERSION,
-            NAME,
-        )
-        return None
+        await api.unregister(hass, DOMAIN)
+    except Exception:
+        _LOGGER.debug("%s war beim Entladen nicht registriert", DOMAIN)
 
-    registration = ExtensionRegistration(
-        name=DOMAIN,
-        version=VERSION,
-        contract_version=CONTRACT_VERSION,
-        features={},
-    )
-    try:
-        await async_register_extension(hass, registration)
-    except ExtensionError as err:
-        raise ConfigEntryError(
-            f"Die Registrierung bei {BASE_DOMAIN} ist fehlgeschlagen: {err}"
-        ) from err
 
-    async def _async_unregister() -> None:
-        try:
-            await async_unregister_extension(hass, DOMAIN)
-        except ExtensionError:
-            # Beim Entladen ist die Abmeldung idempotent; eine bereits
-            # abgemeldete Erweiterung darf den Unload nicht scheitern lassen.
-            _LOGGER.debug("%s war beim Entladen nicht registriert", DOMAIN)
+async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Options geändert: Eintrag neu laden, damit ``ready``/``reason`` stimmen."""
 
-    return _async_unregister
+    await hass.config_entries.async_reload(entry.entry_id)

@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Frickeldave Store Sync einrichten",
-        "description": "Die Basis-Integration `frickeldave_store` muss zuerst eingerichtet sein; sie liefert Store, Rechte und den Erweiterungspunkt, bei dem sich diese Integration registriert. Repository, Branches, Workflow und Token folgen in einer späteren Version."
+        "description": "Die Basis-Integration `frickeldave_store` muss zuerst eingerichtet sein; sie liefert Store, Rechte und den Erweiterungspunkt, bei dem sich diese Integration registriert. Repository, Branches, Workflow und Token lassen sich anschließend in den Einstellungen ändern."
       }
     },
     "abort": {
@@ -15,8 +15,33 @@
     "step": {
       "init": {
         "title": "Frickeldave Store Sync – Einstellungen",
-        "description": "Repository, Branches, Workflow, Token und Importquellen folgen in einer späteren Version. Speichern behält die aktuellen Optionen bei."
+        "description": "Veröffentlichungen committen immer auf den Integrationsbranch; `main` wird ausschließlich vom Produktions-Workflow aktualisiert. Der Token wird write-only gespeichert und nie wieder angezeigt.",
+        "data": {
+          "repository": "Website-Repository (owner/name)",
+          "dev_branch": "Integrationsbranch (dev)",
+          "prod_branch": "Produktionsbranch (main)",
+          "prod_workflow": "Produktions-Workflow (fd-deploy-prd.yml)",
+          "token": "GitHub-Token",
+          "catalog_url": "Katalog-URL für den Import",
+          "image_base_url": "Bildbasis-URL für den Import"
+        },
+        "data_description": {
+          "repository": "Repository, das Katalog und Produktbilder erhält. Commits gehen auf den Integrationsbranch.",
+          "dev_branch": "Branch für Veröffentlichungen. Ein Commit hier löst fd-ci und fd-deploy-dev aus.",
+          "prod_branch": "Branch, auf den der Produktions-Workflow befördert. Direkte Commits sind nicht zulässig.",
+          "prod_workflow": "Workflow, der dev nach main befördert und die Produktion deployt.",
+          "token": "Fine-grained Token mit Contents: write und Actions: write. Wird nie zurückgegeben, geloggt oder exportiert. Leer lassen behält den gespeicherten Token.",
+          "catalog_url": "Nur https-Hosts der Allowlist sind erlaubt (frickeldave.de, raw.githubusercontent.com).",
+          "image_base_url": "Basis-URL der Produktbilder; dieselbe Allowlist wie der Katalog."
+        }
       }
+    },
+    "error": {
+      "invalid_repository": "Das Repository muss die Form owner/name haben.",
+      "invalid_branch": "Der Branch darf nicht leer sein und keine Leerzeichen enthalten.",
+      "invalid_workflow": "Der Workflow muss ein Dateiname sein, zum Beispiel fd-deploy-prd.yml.",
+      "invalid_source_url": "Die Katalog-URL muss eine https-URL der Allowlist sein (frickeldave.de, raw.githubusercontent.com).",
+      "invalid_image_url": "Die Bild-URL muss eine https-URL der Allowlist sein (frickeldave.de, raw.githubusercontent.com)."
     }
   }
 }
