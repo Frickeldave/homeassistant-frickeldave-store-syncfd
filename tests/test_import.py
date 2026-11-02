@@ -351,6 +351,31 @@ async def test_duplicates_and_invalid_products_are_reported() -> None:
     assert any("Kategorie" in message for message in codes)
 
 
+async def test_non_object_entries_are_counted_as_failed() -> None:
+    facade = FakeFacade([])
+
+    result = await _import(
+        facade, FakeSession({"products": ["kaputt", _single("LA0001")]}, images={})
+    )
+
+    assert result["created"] == 1
+    assert result["failed"] == 1
+    assert result["errors"][0]["articleNumber"] == ""
+
+
+async def test_empty_catalog_writes_nothing() -> None:
+    facade = FakeFacade([])
+    before = facade.state_hash()
+
+    result = await _import(facade, FakeSession({"products": []}, images={}))
+
+    assert result["products_total"] == 0
+    assert result["created"] == 0
+    assert facade.batches == [], "leerer Katalog braucht keinen Batch"
+    assert facade.state_hash() == before
+    assert "Import abgeschlossen" in result["summary"]
+
+
 async def test_product_errors_are_reported_once() -> None:
     """Fehler erscheinen genau einmal: Batch-Fehler plus Bildfehler, nicht doppelt."""
 

@@ -668,6 +668,12 @@ async def async_import_catalog(
                 max_concurrency=max_concurrency,
             )
 
+        if not raw_products:
+            # Leerer Katalog: nichts zu planen, kein Batch, kein Snapshot.
+            empty = ImportPreview(products_total=0)
+            empty.summary = build_summary(empty)
+            return empty.to_dict()
+
         if options.dry_run:
             preview = ImportPreview(
                 products_total=len(raw_products),
@@ -704,18 +710,19 @@ def _build_items(
     items: list[Any] = []
     attached: set[str] = set()
     for raw in raw_products:
-        article: str | None = None
-        if isinstance(raw, Mapping):
-            article = str(raw.get("articleNumber", "")).strip().upper() or None
-        images = ()
+        if not isinstance(raw, Mapping):
+            # Kein Objekt: unverändert weiterreichen, die Basis meldet den Fehler.
+            items.append(raw)
+            continue
+        article = str(raw.get("articleNumber", "")).strip().upper() or None
+        images: tuple[Any, ...] = ()
         if article is not None and article in uploads and article not in attached:
             attached.add(article)
             images = tuple(
                 api.image_upload(image.name, image.data, is_main=image.is_main)
                 for image in uploads[article]
             )
-        payload = dict(raw) if isinstance(raw, Mapping) else raw
-        items.append(api.import_item(article, payload, images=images))
+        items.append(api.import_item(article, dict(raw), images=images))
     return items
 
 
