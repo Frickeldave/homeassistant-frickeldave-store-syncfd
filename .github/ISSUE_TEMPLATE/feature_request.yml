@@ -1,0 +1,29 @@
+name: Funktionswunsch
+description: Idee oder Erweiterung für die Synchronisation
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: purpose
+    attributes:
+      label: Zweck
+      description: Welches Problem löst der Wunsch?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Vorschlag
+      description: Wie soll es sich verhalten?
+    validations:
+      required: false
+  - type: dropdown
+    id: area
+    attributes:
+      label: Bereich
+      options:
+        - Veröffentlichen (publish)
+        - Import (import)
+        - Einrichtung und Optionen
+        - Dokumentation
+    validations:
+      required: true

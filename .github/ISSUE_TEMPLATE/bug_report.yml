@@ -1,0 +1,44 @@
+name: Fehlerbericht
+description: Etwas funktioniert nicht wie erwartet
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Bitte keine Tokens, Zugangsdaten oder vollständigen Store-Dateien einfügen.
+  - type: input
+    id: version
+    attributes:
+      label: Version der Erweiterung
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: base_version
+    attributes:
+      label: Version der Basis-Integration frickeldave_store
+      placeholder: "0.1.15"
+    validations:
+      required: true
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home-Assistant-Version
+      placeholder: "2025.1.4"
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Beobachtetes Verhalten
+      description: Was ist passiert, und was war erwartet?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevante Logzeilen
+      description: Ohne Tokens und ohne personenbezogene Daten.
+      render: text
+    validations:
+      required: false
