@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: "Ruff"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install ruff==0.17.3
+      - run: ruff check .
+      - run: ruff format --check .
+
+  typing:
+    name: "mypy"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install mypy aiohttp==3.11.11 voluptuous==0.15.2 homeassistant==2025.1.4
+      - run: mypy custom_components
+
+  tests:
+    name: "pytest"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install pytest==8.3.4 pytest-asyncio==0.24.0 pytest-homeassistant-custom-component==0.13.205 homeassistant==2025.1.4 home-assistant-frontend==20250109.2 aiohttp==3.11.11 voluptuous==0.15.2
+      - run: pytest -q
+
+  hassfest:
+    name: "hassfest"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: "HACS validation"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hacs/action@main
+        with:
+          category: integration
