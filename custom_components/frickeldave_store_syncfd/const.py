@@ -6,7 +6,7 @@ from typing import Final
 
 DOMAIN: Final = "frickeldave_store_syncfd"
 NAME: Final = "Frickeldave Store Sync"
-VERSION: Final = "0.1.2"
+VERSION: Final = "0.1.3"
 ISSUE_URL: Final = "https://github.com/Frickeldave/frickeldave.github.io/issues/289"
 REPOSITORY_URL: Final = "https://github.com/Frickeldave/homeassistant-frickeldave-store-syncfd"
 

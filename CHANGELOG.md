@@ -8,6 +8,14 @@ Alle nennenswerten Änderungen dieser Integration. Das Format orientiert sich an
 
 ### Fixed
 
+- **Prod-Dry-Run vergleicht jetzt gegen `main` (#289).**
+  Der Bericht für „Nach Prod veröffentlichen“ liest den Dateibaum und den
+  Katalog des Produktionsbranchs (`main`) statt immer `dev`; Zähler, Produkte,
+  Bilder, Dateiliste und Löschschutz spiegeln damit das, was nach der Promotion
+  tatsächlich in Produktion ankommt. Der Commit bleibt auf `dev`, und
+  `fd-deploy-prd.yml` wird unverändert auf `main` ausgelöst. Die Antwort enthält
+  zusätzlich `compare_branch` (Vergleichsbasis des Berichts) und `commit_branch`
+  (Zielbranch des Commits), und die Zusammenfassung nennt die Vergleichsbasis.
 - **Der Dry-Run meldet Produkte nicht mehr fälschlich als neu (#289).**
   Ist `handmade.json` byte-identisch, gelten alle Produkte als unverändert und
   GitHub wird für den Katalogvergleich nicht mehr gelesen. Die Produktzähler
