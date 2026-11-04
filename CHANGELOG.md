@@ -4,6 +4,20 @@ Alle nennenswerten Änderungen dieser Integration. Das Format orientiert sich an
 [Keep a Changelog](https://keepachangelog.com/de/1.1.0/); die Versionen folgen
 [Semantic Versioning](https://semver.org/lang/de/).
 
+## [Unreleased]
+
+### Fixed
+
+- **GitHub-Fehler beim Veröffentlichen sind jetzt diagnostizierbar (#289).**
+  Antwortet GitHub mit 5xx, nennt die Meldung zusätzlich den HTTP-Status und
+  GitHubs `message` (einzeilig, gekürzt, ohne Token oder Payload) — statt nur
+  „Störung auf der GitHub-Seite“. Jede fehlgeschlagene Antwort wird mit Methode,
+  Pfad (ohne Query), Status und Meldung als Warnung protokolliert. Vorübergehende
+  Fehler (Timeout, `aiohttp.ClientError`, HTTP 500/502/503/504) werden bis zu drei
+  Mal versucht (Backoff 0,5 s, dann 1,5 s); das abschließende
+  `PATCH git/refs/heads/<branch>` bleibt bewusst ohne Retry, weil es nicht
+  idempotent ist.
+
 ## [0.1.0] - 2026-11-02
 
 Erste Version: Die frickeldave-spezifische Synchronisation lebt vollständig in
