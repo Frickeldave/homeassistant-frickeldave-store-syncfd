@@ -8,6 +8,10 @@ Alle nennenswerten Änderungen dieser Integration. Das Format orientiert sich an
 
 ### Fixed
 
+- **Der Dry-Run meldet Produkte nicht mehr fälschlich als neu (#289).**
+  Ist `handmade.json` byte-identisch, gelten alle Produkte als unverändert und
+  GitHub wird für den Katalogvergleich nicht mehr gelesen. Die Produktzähler
+  passen damit zu den Dateizählern.
 - **GitHub-Fehler beim Veröffentlichen sind jetzt diagnostizierbar (#289).**
   Antwortet GitHub mit 5xx, nennt die Meldung zusätzlich den HTTP-Status und
   GitHubs `message` (einzeilig, gekürzt, ohne Token oder Payload) — statt nur
