@@ -37,6 +37,7 @@ from custom_components.frickeldave_store_syncfd.publish import (
     build_artifacts,
     diff_artifacts,
     publish_removal_guard,
+    unchanged_product_counts,
 )
 from custom_components.frickeldave_store_syncfd.settings import SyncSettings
 
@@ -154,6 +155,20 @@ async def _call(
     return await fake_base.FakeBase(hass).call(feature, payload, facade=facade)
 
 
+async def _artifacts(facade: FakeFacade) -> dict[str, bytes]:
+    """Veröffentlichungssatz, wie ihn der Service aus der Fassade baut."""
+
+    products = await facade.async_products()
+    bundle = await facade.async_build_export()
+    return build_artifacts(bundle, products)
+
+
+def _remote_matching(artifacts: dict[str, bytes]) -> dict[str, str]:
+    """Remote-Dateibaum, der exakt dem lokalen Veröffentlichungssatz entspricht."""
+
+    return {path: blob_sha(data) for path, data in artifacts.items()}
+
+
 async def _setup_entry(hass: HomeAssistant, **options: Any) -> MockConfigEntry:
     mock_integration(hass, MockModule(BASE_DOMAIN), built_in=False)
     hass.config.components.add(BASE_DOMAIN)
@@ -194,6 +209,83 @@ async def test_dry_run_reports_changes_without_any_write() -> None:
     assert catalog_file["kind"] == "catalog"
     image_files = [item for item in result["files"] if item["kind"] == "image"]
     assert [item["articleNumber"] for item in image_files] == ["LAABCD", "LAABCD"]
+
+
+async def test_dry_run_with_identical_remote_reports_unchanged_products() -> None:
+    """Regression #289: byte-identischer Katalog ⇒ alle Produkte unverändert."""
+
+    facade = _facade()
+    artifacts = await _artifacts(facade)
+    fake = FakeGitHub(remote=_remote_matching(artifacts))
+    service = _service(facade, fake)
+
+    result = await service.async_publish("dev", dry_run=True)
+
+    assert fake.commits == []
+    assert fake.reads == [], "unveränderter Katalog darf nicht gelesen werden"
+    total_files = len(artifacts)
+    assert result["counts"] == {
+        "added": 0,
+        "changed": 0,
+        "removed": 0,
+        "unchanged": total_files,
+        "total": total_files,
+    }
+    product_total = len(json.loads(artifacts[CATALOG_PATH])["products"])
+    assert result["products"] == {
+        "added": 0,
+        "changed": 0,
+        "removed": 0,
+        "unchanged": product_total,
+        "total": product_total,
+    }
+    assert {item["status"] for item in result["files"]} == {"unchanged"}
+
+
+async def test_dry_run_with_changed_catalog_reports_changed_products() -> None:
+    facade = _facade()
+    artifacts = await _artifacts(facade)
+    remote_catalog = json.loads(artifacts[CATALOG_PATH])
+    remote_catalog["products"][0]["name"] = "Geänderter Name"
+    remote_bytes = json.dumps(remote_catalog, ensure_ascii=False, indent=2).encode("utf-8")
+    remote = _remote_matching(artifacts) | {CATALOG_PATH: blob_sha(remote_bytes)}
+    fake = FakeGitHub(remote=remote, files={CATALOG_PATH: remote_bytes})
+    service = _service(facade, fake)
+
+    result = await service.async_publish("dev", dry_run=True)
+
+    assert fake.reads == [CATALOG_PATH]
+    product_total = len(remote_catalog["products"])
+    assert result["products"] == {
+        "added": 0,
+        "changed": product_total,
+        "removed": 0,
+        "unchanged": 0,
+        "total": product_total,
+    }
+    assert result["counts"]["changed"] == 1
+    assert result["counts"]["unchanged"] == len(artifacts) - 1
+
+
+def test_unchanged_product_counts_matches_catalog_structure() -> None:
+    empty = json.dumps({"products": []}).encode("utf-8")
+    assert unchanged_product_counts(empty) == {
+        "added": 0,
+        "changed": 0,
+        "removed": 0,
+        "unchanged": 0,
+        "total": 0,
+    }
+
+    catalog = {"products": [{"articleNumber": "LAABCD"}, {"articleNumber": "WO0001"}]}
+    expected = len(catalog["products"])
+    assert unchanged_product_counts(json.dumps(catalog).encode("utf-8")) == {
+        "added": 0,
+        "changed": 0,
+        "removed": 0,
+        "unchanged": expected,
+        "total": expected,
+    }
 
 
 async def test_publish_dev_commits_once_and_is_idempotent() -> None:
@@ -950,4 +1042,4 @@ def test_settings_use_the_frickeldave_defaults() -> None:
     assert settings.prod_branch == "main"
     assert settings.prod_workflow == "fd-deploy-prd.yml"
     assert settings.catalog_url == "https://frickeldave.de/data/handmade.json"
-    assert VERSION == "0.1.1"
+    assert VERSION == "0.1.2"

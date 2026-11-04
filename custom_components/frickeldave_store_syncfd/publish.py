@@ -446,6 +446,24 @@ def diff_products(local_catalog: bytes, remote_catalog: bytes | None) -> dict[st
     return counts
 
 
+def unchanged_product_counts(local_catalog: bytes) -> dict[str, int]:
+    """Produktzähler für einen byte-identischen Katalog.
+
+    Gleiche Katalogbytes bedeuten zwangsläufig gleiche Produkte: es kann weder
+    etwas hinzugekommen, geändert noch entfernt worden sein. Der Remote-Katalog
+    muss dafür nicht gelesen werden.
+    """
+
+    total = len(_catalog_products(local_catalog))
+    return {
+        "added": 0,
+        "changed": 0,
+        "removed": 0,
+        "unchanged": total,
+        "total": total,
+    }
+
+
 def diff_images(changes: Iterable[FileChange], local_total: int) -> dict[str, int]:
     counts = {"added": 0, "changed": 0, "removed": 0, "unchanged": 0, "total": local_total}
     for change in changes:
@@ -943,11 +961,13 @@ class PublishService:
                 warnings.append(guard_message)
 
             local_catalog = artifacts[CATALOG_PATH]
-            remote_catalog: bytes | None = None
             catalog_change = next((item for item in changes if item.kind == KIND_CATALOG), None)
-            if catalog_change is not None and catalog_change.status != STATUS_UNCHANGED:
+            if catalog_change is None or catalog_change.status == STATUS_UNCHANGED:
+                # Unveränderte Katalogdatei = unveränderte Produkte; kein GitHub-Read.
+                product_counts = unchanged_product_counts(local_catalog)
+            else:
                 remote_catalog = await client.async_read_file(CATALOG_PATH)
-            product_counts = diff_products(local_catalog, remote_catalog)
+                product_counts = diff_products(local_catalog, remote_catalog)
             image_counts = diff_images(changes, len(artifacts) - 1)
             warning = " ".join(warnings) or None
             removal_guard = {
@@ -1155,4 +1175,5 @@ __all__ = [
     "publish_removal_guard",
     "published_image_names",
     "removal_guard_message",
+    "unchanged_product_counts",
 ]
