@@ -188,6 +188,16 @@ def _summary_with_warning(summary: str, warning: str | None) -> str:
     return f"{summary} Hinweis: {warning}" if warning else summary
 
 
+def _require_complete_tree(tree: RemoteTree) -> None:
+    """Abgeschnittene Bäume verfälschen jeden Vergleich."""
+
+    if tree.truncated:  # pragma: no cover - nur bei sehr großen Repositories
+        raise _error(
+            "github_failed",
+            "Der Dateibaum des Repositorys ist zu groß für einen Vergleich.",
+        )
+
+
 def _decoded_or_empty(raw: bytes) -> dict[str, Any]:
     """Fehlerantwort-Body für ``_raise_for_status``; kaputtes JSON zählt als leer."""
 
@@ -478,9 +488,9 @@ def diff_images(changes: Iterable[FileChange], local_total: int) -> dict[str, in
 class GitHubClientProtocol(Protocol):
     """Von :class:`PublishService` genutzte GitHub-Operationen (testbar)."""
 
-    async def async_read_tree(self) -> RemoteTree: ...
+    async def async_read_tree(self, branch: str | None = None) -> RemoteTree: ...
 
-    async def async_read_file(self, path: str) -> bytes | None: ...
+    async def async_read_file(self, path: str, branch: str | None = None) -> bytes | None: ...
 
     async def async_commit(
         self,
@@ -722,8 +732,9 @@ class GitHubClient:
         raise _error("github_failed", f"GitHub hat die Anfrage abgelehnt (HTTP {status}).")
 
     # ------------------------------------------------------------------ Lesen
-    async def async_read_tree(self) -> RemoteTree:
-        branch = quote(self._settings.dev_branch, safe="")
+    async def async_read_tree(self, branch: str | None = None) -> RemoteTree:
+        # Ohne expliziten Branch bleibt es beim bisherigen Verhalten (dev).
+        branch = quote(branch or self._settings.dev_branch, safe="")
         ref = _as_mapping(
             await self._async_json("GET", self._url(f"git/ref/heads/{branch}")),
             "GitHub hat den Branch-Status nicht im erwarteten Format geliefert. "
@@ -756,9 +767,9 @@ class GitHubClient:
             truncated=bool(tree.get("truncated", False)),
         )
 
-    async def async_read_file(self, path: str) -> bytes | None:
-        branch = quote(self._settings.dev_branch, safe="")
-        return await self._async_bytes(self._url(f"contents/{path}?ref={branch}"))
+    async def async_read_file(self, path: str, branch: str | None = None) -> bytes | None:
+        ref = quote(branch or self._settings.dev_branch, safe="")
+        return await self._async_bytes(self._url(f"contents/{path}?ref={ref}"))
 
     # ------------------------------------------------------------------ Schreiben
     async def async_commit(
@@ -930,23 +941,33 @@ class PublishService:
 
         client = self._client(settings)
         try:
-            tree = await client.async_read_tree()
-            if tree.truncated:  # pragma: no cover - nur bei sehr großen Repositories
-                raise _error(
-                    "github_failed",
-                    "Der Dateibaum des Repositorys ist zu groß für einen Vergleich.",
-                )
-            changes = diff_artifacts(artifacts, tree.blobs)
+            # Der Bericht beschreibt den Zielzustand: für prod also den Stand von
+            # main, den der Workflow nach dem Merge von dev herstellt. Der Commit
+            # bleibt auf dev, deshalb wird dieser Baum separat gelesen.
+            report_branch = settings.prod_branch if target == "prod" else settings.dev_branch
+            commit_branch = settings.dev_branch
+            report_tree = await client.async_read_tree(report_branch)
+            _require_complete_tree(report_tree)
+            if target == "prod":
+                dev_tree = await client.async_read_tree(commit_branch)
+                _require_complete_tree(dev_tree)
+            else:
+                # Für dev sind Berichts- und Commit-Basis derselbe Baum.
+                dev_tree = report_tree
+            changes = diff_artifacts(artifacts, report_tree.blobs)
             counts = _status_counts(changes)
+            dev_changes = changes if target != "prod" else diff_artifacts(artifacts, dev_tree.blobs)
 
             # Löschschutz: Absolut- und Anteilsgrenze gelten gemeinsam. Im Dry-Run
             # bleibt es bei einer Warnung, damit der Plan vollständig sichtbar ist.
+            # Grundlage ist der Berichtsstand (Zielbranch): genau diese Bilder
+            # verschwinden nach der Promotion aus dem Zielbranch.
             removed_images = sum(
                 1
                 for change in changes
                 if change.kind == KIND_IMAGE and change.status == STATUS_REMOVED
             )
-            existing_images = len(_managed_image_paths(tree.blobs))
+            existing_images = len(_managed_image_paths(report_tree.blobs))
             guard = publish_removal_guard(removed_images, existing_images)
             if guard:
                 guard_message = removal_guard_message(removed_images, existing_images)
@@ -966,7 +987,8 @@ class PublishService:
                 # Unveränderte Katalogdatei = unveränderte Produkte; kein GitHub-Read.
                 product_counts = unchanged_product_counts(local_catalog)
             else:
-                remote_catalog = await client.async_read_file(CATALOG_PATH)
+                # Produktzahlen beziehen sich auf den Zielbranch: für prod also main.
+                remote_catalog = await client.async_read_file(CATALOG_PATH, report_branch)
                 product_counts = diff_products(local_catalog, remote_catalog)
             image_counts = diff_images(changes, len(artifacts) - 1)
             warning = " ".join(warnings) or None
@@ -983,6 +1005,8 @@ class PublishService:
                 target=target,
                 settings=settings,
                 dry_run=dry_run,
+                compare_branch=report_branch,
+                commit_branch=commit_branch,
                 changes=changes,
                 counts=counts,
                 product_counts=product_counts,
@@ -996,18 +1020,21 @@ class PublishService:
                 return result
 
             commit_sha: str | None = None
-            if counts[STATUS_ADDED] or counts[STATUS_CHANGED] or counts[STATUS_REMOVED]:
+            if any(
+                change.status in (STATUS_ADDED, STATUS_CHANGED, STATUS_REMOVED)
+                for change in dev_changes
+            ):
                 commit_sha = await client.async_commit(
                     artifacts,
-                    changes,
-                    head_sha=tree.head_sha,
-                    tree_sha=tree.tree_sha,
+                    dev_changes,
+                    head_sha=dev_tree.head_sha,
+                    tree_sha=dev_tree.tree_sha,
                     message=commit_message,
                 )
                 _LOGGER.info(
                     "Katalog nach %s veröffentlicht (%s Dateien, Commit %s, Benutzer %s)",
-                    settings.dev_branch,
-                    counts["total"],
+                    commit_branch,
+                    len(dev_changes),
                     commit_sha[:7],
                     user_id or "-",
                 )
@@ -1038,6 +1065,7 @@ class PublishService:
                     image_counts,
                     dry_run=False,
                     committed=commit_sha is not None,
+                    compare_branch=report_branch,
                 ),
                 warning,
             )
@@ -1051,6 +1079,8 @@ class PublishService:
         target: str,
         settings: SyncSettings,
         dry_run: bool,
+        compare_branch: str,
+        commit_branch: str,
         changes: list[FileChange],
         counts: dict[str, int],
         product_counts: dict[str, int],
@@ -1076,6 +1106,8 @@ class PublishService:
             "dry_run": dry_run,
             "repository": settings.repository,
             "branch": settings.dev_branch,
+            "compare_branch": compare_branch,
+            "commit_branch": commit_branch,
             "commit": None,
             "changed": False,
             "counts": counts,
@@ -1095,6 +1127,7 @@ class PublishService:
                     image_counts,
                     dry_run=dry_run,
                     committed=False,
+                    compare_branch=compare_branch,
                 ),
                 warning,
             ),
@@ -1110,6 +1143,7 @@ class PublishService:
         *,
         dry_run: bool,
         committed: bool,
+        compare_branch: str,
     ) -> str:
         def _describe(values: dict[str, int], noun: str) -> str:
             return (
@@ -1129,10 +1163,11 @@ class PublishService:
         if dry_run:
             if target == "prod":
                 parts.append(
-                    "Dry-Run: Es wird nichts geschrieben. Beim Veröffentlichen würde "
-                    f"zuerst ein Commit auf {settings.dev_branch} gepusht und danach "
-                    f"{settings.prod_workflow} ausgelöst (main wird nur über diesen "
-                    "Workflow aktualisiert)."
+                    f"Vergleichsbasis: {compare_branch}. Dry-Run: Es wird nichts "
+                    "geschrieben. Beim Veröffentlichen würde zuerst ein Commit auf "
+                    f"{settings.dev_branch} gepusht und danach {settings.prod_workflow} "
+                    f"ausgelöst ({compare_branch} wird nur über diesen Workflow "
+                    "aktualisiert)."
                 )
             else:
                 parts.append(
@@ -1142,8 +1177,15 @@ class PublishService:
                 )
             return "; ".join(parts) + "."
         if target == "prod":
-            prefix = "Katalog auf dev committet" if committed else "Keine Dateiänderungen auf dev"
-            return "; ".join(parts) + f". {prefix}; {settings.prod_workflow} wurde ausgelöst."
+            prefix = (
+                f"Commit auf {settings.dev_branch} gepusht"
+                if committed
+                else f"Keine Dateiänderungen auf {settings.dev_branch}"
+            )
+            return (
+                "; ".join(parts) + f". Vergleichsbasis: {compare_branch}. {prefix}; danach "
+                f"{settings.prod_workflow} wurde ausgelöst."
+            )
         if committed:
             return (
                 "; ".join(parts)

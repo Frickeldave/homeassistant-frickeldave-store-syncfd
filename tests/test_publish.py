@@ -55,19 +55,39 @@ class FakeGitHub:
         *,
         remote: dict[str, str] | None = None,
         files: dict[str, bytes] | None = None,
+        prod_remote: dict[str, str] | None = None,
+        prod_files: dict[str, bytes] | None = None,
+        prod_branch: str = "main",
     ) -> None:
         self.remote = dict(remote or {})
         self.files = dict(files or {})
+        self.prod_branch = prod_branch
+        # Ohne eigene Prod-Sicht entspricht der Zielbranch dem Dev-Stand.
+        self.prod_remote = dict(self.remote if prod_remote is None else prod_remote)
+        self.prod_files = dict(self.files if prod_files is None else prod_files)
         self.commits: list[dict[str, Any]] = []
         self.dispatches: list[dict[str, Any]] = []
         self.reads: list[str] = []
+        self.read_branches: list[tuple[str, str | None]] = []
+        self.tree_reads: list[str | None] = []
         self.closed = False
 
-    async def async_read_tree(self) -> RemoteTree:
+    def _is_prod(self, branch: str | None) -> bool:
+        return branch is not None and branch == self.prod_branch
+
+    async def async_read_tree(self, branch: str | None = None) -> RemoteTree:
+        self.tree_reads.append(branch)
+        if self._is_prod(branch):
+            return RemoteTree(
+                head_sha="main-head", tree_sha="main-tree", blobs=dict(self.prod_remote)
+            )
         return RemoteTree(head_sha="head-sha", tree_sha="base-tree", blobs=dict(self.remote))
 
-    async def async_read_file(self, path: str) -> bytes | None:
+    async def async_read_file(self, path: str, branch: str | None = None) -> bytes | None:
         self.reads.append(path)
+        self.read_branches.append((path, branch))
+        if self._is_prod(branch):
+            return self.prod_files.get(path)
         return self.files.get(path)
 
     async def async_commit(
@@ -334,6 +354,89 @@ async def test_publish_prod_commits_to_dev_then_dispatches_deploy_prd() -> None:
     again = await service.async_publish("prod")
     assert again["changed"] is False
     assert len(fake.dispatches) == 2, "Produktion darf auch ohne Dateiänderung promoten"
+
+
+async def test_publish_prod_dry_run_compares_against_the_prod_branch() -> None:
+    """Regression #289: prod vergleicht gegen main, committet aber auf dev."""
+
+    facade = _facade()
+    artifacts = await _artifacts(facade)
+    # dev ist aktuell, main kennt die Produkte noch nicht.
+    fake = FakeGitHub(remote=_remote_matching(artifacts), prod_remote={})
+    service = _service(facade, fake)
+
+    result = await service.async_publish("prod", dry_run=True)
+
+    assert fake.commits == []
+    assert fake.dispatches == []
+    assert fake.tree_reads == ["main", "dev"], "dev-Baum genau einmal als Commit-Basis"
+    assert result["compare_branch"] == "main"
+    assert result["commit_branch"] == "dev"
+    assert result["counts"]["added"] == len(artifacts)
+    assert result["products"]["added"] == 1
+    assert result["products"]["unchanged"] == 0
+    assert fake.read_branches == [(CATALOG_PATH, "main")]
+    assert "Vergleichsbasis: main" in result["summary"]
+    assert result["deployment"]["triggered"] is False
+    assert result["deployment"]["would_trigger"] is True
+
+
+async def test_publish_prod_with_current_dev_skips_commit_but_dispatches() -> None:
+    facade = _facade()
+    artifacts = await _artifacts(facade)
+    fake = FakeGitHub(remote=_remote_matching(artifacts), prod_remote={})
+    service = _service(facade, fake)
+
+    result = await service.async_publish("prod")
+
+    assert fake.commits == [], "dev ist bereits aktuell: kein Commit"
+    assert fake.remote == _remote_matching(artifacts), "dev-Ref bleibt unverändert"
+    assert result["commit"] is None
+    assert result["changed"] is False
+    assert len(fake.dispatches) == 1
+    assert fake.dispatches[0]["ref"] == "main"
+    assert result["counts"]["added"] == len(artifacts), "Bericht zeigt das Prod-Delta"
+    assert result["products"]["added"] == 1
+    assert "Keine Dateiänderungen auf dev" in result["summary"]
+    assert "Vergleichsbasis: main" in result["summary"]
+    assert "fd-deploy-prd.yml wurde ausgelöst" in result["summary"]
+
+
+async def test_publish_prod_commits_on_dev_when_dev_also_lacks_content() -> None:
+    facade = _facade()
+    fake = FakeGitHub(remote={}, prod_remote={})
+    service = _service(facade, fake)
+
+    result = await service.async_publish("prod")
+
+    assert len(fake.commits) == 1
+    commit = fake.commits[0]
+    assert commit["head_sha"] == "head-sha", "Commit basiert auf dev, nicht auf main"
+    assert commit["tree_sha"] == "base-tree"
+    assert result["commit"] == "commit-1"
+    assert result["changed"] is True
+    assert [dispatch["ref"] for dispatch in fake.dispatches] == ["main"]
+    assert result["counts"]["added"] == 3
+    assert result["products"]["added"] == 1
+    assert "Commit auf dev gepusht" in result["summary"]
+    assert "Vergleichsbasis: main" in result["summary"]
+
+
+async def test_publish_dev_still_compares_against_dev_only() -> None:
+    facade = _facade()
+    artifacts = await _artifacts(facade)
+    # Prod weicht ab: ein dev-Lauf darf main trotzdem nicht lesen.
+    fake = FakeGitHub(remote=_remote_matching(artifacts), prod_remote={})
+    service = _service(facade, fake)
+
+    result = await service.async_publish("dev", dry_run=True)
+
+    assert fake.tree_reads == ["dev"]
+    assert result["compare_branch"] == "dev"
+    assert result["commit_branch"] == "dev"
+    assert result["counts"]["added"] == 0
+    assert result["products"]["unchanged"] == 1
+    assert "Vergleichsbasis" not in result["summary"]
 
 
 async def test_publish_reports_removed_images() -> None:
@@ -713,6 +816,37 @@ async def test_github_chunked_json_without_content_length_is_read() -> None:
     assert body == {"object": {"sha": "head-1"}}
 
 
+async def test_github_client_reads_the_requested_branch() -> None:
+    """Regression #289: der Branch-Parameter landet in der GitHub-URL."""
+
+    client, session = _client(
+        [
+            FakeHTTPResponse(200, b"katalog"),
+            FakeHTTPResponse(200, {"object": {"sha": "main-head"}}),
+            FakeHTTPResponse(200, {"tree": {"sha": "main-tree"}}),
+            FakeHTTPResponse(
+                200,
+                {
+                    "tree": [{"path": CATALOG_PATH, "type": "blob", "sha": "x"}],
+                    "truncated": False,
+                },
+            ),
+        ]
+    )
+    base = "https://api.github.com/repos/Frickeldave/frickeldave.github.io"
+
+    assert await client.async_read_file(CATALOG_PATH, "main") == b"katalog"
+    tree = await client.async_read_tree("main")
+
+    assert tree.head_sha == "main-head"
+    assert [call["url"] for call in session.calls] == [
+        f"{base}/contents/{CATALOG_PATH}?ref=main",
+        f"{base}/git/ref/heads/main",
+        f"{base}/git/commits/main-head",
+        f"{base}/git/trees/main-tree?recursive=1",
+    ]
+
+
 async def test_dry_run_reads_chunked_github_responses_end_to_end() -> None:
     facade = _facade()
     remote_catalog = json.dumps({"products": []}).encode("utf-8")
@@ -1042,4 +1176,4 @@ def test_settings_use_the_frickeldave_defaults() -> None:
     assert settings.prod_branch == "main"
     assert settings.prod_workflow == "fd-deploy-prd.yml"
     assert settings.catalog_url == "https://frickeldave.de/data/handmade.json"
-    assert VERSION == "0.1.2"
+    assert VERSION == "0.1.3"
