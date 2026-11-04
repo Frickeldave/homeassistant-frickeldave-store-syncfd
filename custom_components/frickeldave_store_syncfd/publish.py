@@ -18,19 +18,25 @@ Mechanismus (unverändert gegenüber der Basis):
 Alle schreibenden Aufrufe liegen hinter ``if dry_run`` bzw. hinter dem
 Änderungsvergleich. Ein Dry-Run liest ausschließlich (Branch, Baum, ggf. den
 entfernten Katalog) und berührt weder Store noch Repository.
+
+Vorübergehende GitHub-Fehler (Timeouts, ``aiohttp.ClientError`` sowie HTTP
+500/502/503/504) werden bis zu :data:`RETRY_ATTEMPTS` Mal versucht. Ausgenommen
+ist allein das abschließende ``PATCH git/refs/heads/<branch>``: ein Retry könnte
+den Branch nach einem verlorenen Erfolg erneut verschieben.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 import logging
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final, Protocol
+from typing import Any, Final, Protocol, TypeVar
 from urllib.parse import quote
 
 import aiohttp
@@ -45,6 +51,15 @@ PUBLISH_TARGETS: Final[tuple[str, ...]] = ("dev", "prod")
 GITHUB_API_URL: Final = "https://api.github.com"
 GITHUB_TIMEOUT: Final = 30
 MAX_MESSAGE_LENGTH: Final = 200
+#: Obergrenze der Fehlerdetails in Meldungen und Logs (eine Zeile, ohne Token).
+MAX_ERROR_DETAIL_LENGTH: Final = 200
+
+#: Vorübergehende Fehler: Wiederholung ist hier sinnvoll (Issue #289).
+RETRY_ATTEMPTS: Final = 3
+RETRY_BACKOFF: Final[tuple[float, ...]] = (0.5, 1.5)
+RETRY_STATUSES: Final[tuple[int, ...]] = (500, 502, 503, 504)
+
+_T = TypeVar("_T")
 #: Obergrenze für die Dateiliste in der Antwort (Zählungen bleiben vollständig).
 MAX_CHANGE_ENTRIES: Final = 500
 #: Status ohne Body: hier ist ``None`` das korrekte Ergebnis, nicht ein Fehler.
@@ -98,6 +113,20 @@ EMPTY_CATALOG_MESSAGE: Final = (
 
 def _error(code: str, message: str) -> SyncError:
     return SyncError(message, code=code)
+
+
+def _one_line(value: Any, *, limit: int = MAX_ERROR_DETAIL_LENGTH) -> str:
+    """Text auf eine Zeile und ``limit`` Zeichen begrenzen (Logs, Meldungen)."""
+
+    return " ".join(str(value or "").split())[:limit].strip()
+
+
+class _TransientGitHubError(Exception):
+    """Vorübergehender GitHub-Fehler: ein erneuter Versuch ist erlaubt."""
+
+    def __init__(self, error: SyncError) -> None:
+        super().__init__(error.message)
+        self.error = error
 
 
 def normalise_message(value: Any) -> str:
@@ -462,16 +491,34 @@ class GitHubClient:
         session: aiohttp.ClientSession | None = None,
         timeout: int = GITHUB_TIMEOUT,
         api_url: str = GITHUB_API_URL,
+        retry_delays: Sequence[float] = RETRY_BACKOFF,
     ) -> None:
         self._settings = settings
         self._session = session
         self._owns_session = session is None
         self._timeout = timeout
         self._api_url = api_url.rstrip("/")
+        # Tests setzen hier Nullverzögerungen: nie im Test schlafen.
+        self._retry_delays = tuple(retry_delays)
 
     # ------------------------------------------------------------------ HTTP
     def _url(self, path: str) -> str:
         return f"{self._api_url}/repos/{self._settings.repository}/{path.lstrip('/')}"
+
+    def _request_path(self, url: str) -> str:
+        """Pfad ohne Query für Logs: Query-Parameter gehören nicht ins Log."""
+
+        prefix = f"{self._api_url}/repos/{self._settings.repository}/"
+        return url.removeprefix(prefix).split("?", 1)[0]
+
+    def _log_transport_failure(self, method: str, path: str, err: BaseException) -> None:
+        _LOGGER.warning(
+            "GitHub %s %s → %s (%s)",
+            method,
+            path,
+            type(err).__name__,
+            _one_line(err),
+        )
 
     def _client_session(self) -> aiohttp.ClientSession:
         if self._session is None:
@@ -487,8 +534,63 @@ class GitHubClient:
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
+    async def _async_retrying(
+        self,
+        operation: Callable[[], Awaitable[_T]],
+        *,
+        method: str,
+        path: str,
+        attempts: int,
+    ) -> _T:
+        """Bis zu ``attempts`` Versuche bei vorübergehenden GitHub-Fehlern."""
+
+        last: _TransientGitHubError | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return await operation()
+            except _TransientGitHubError as failure:
+                last = failure
+                if attempt >= attempts:
+                    break
+                delay = 0.0
+                if self._retry_delays:
+                    delay = self._retry_delays[min(attempt - 1, len(self._retry_delays) - 1)]
+                _LOGGER.debug(
+                    "GitHub %s %s vorübergehend fehlgeschlagen (Versuch %s/%s), "
+                    "neuer Versuch in %.1f s",
+                    method,
+                    path,
+                    attempt,
+                    attempts,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+        assert last is not None
+        raise last.error from last
+
     async def _async_json(
-        self, method: str, url: str, *, payload: dict[str, Any] | None = None
+        self,
+        method: str,
+        url: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        retry: bool = True,
+    ) -> Any:
+        path = self._request_path(url)
+        return await self._async_retrying(
+            lambda: self._async_json_once(method, url, payload=payload, path=path),
+            method=method,
+            path=path,
+            attempts=RETRY_ATTEMPTS if retry else 1,
+        )
+
+    async def _async_json_once(
+        self,
+        method: str,
+        url: str,
+        *,
+        payload: dict[str, Any] | None,
+        path: str,
     ) -> Any:
         session = self._client_session()
         try:
@@ -504,7 +606,14 @@ class GitHubClient:
                 # nicht als Leer-Kriterium. GitHub antwortet regelmäßig so.
                 raw = await response.read()
                 if response.status >= 400:
-                    self._raise_for_status(response.status, _decoded_or_empty(raw))
+                    try:
+                        self._raise_for_status(
+                            method, path, response.status, _decoded_or_empty(raw)
+                        )
+                    except SyncError as err:
+                        if response.status in RETRY_STATUSES:
+                            raise _TransientGitHubError(err) from err
+                        raise
                 if response.status in NO_BODY_STATUSES or not raw:
                     return None
                 try:
@@ -516,12 +625,24 @@ class GitHubClient:
                         "Störungsseite). Bitte später erneut versuchen.",
                     ) from err
         except (TimeoutError, aiohttp.ClientError) as err:
-            raise _error(
-                "github_unavailable",
-                "GitHub ist momentan nicht erreichbar. Bitte später erneut versuchen.",
+            self._log_transport_failure(method, path, err)
+            raise _TransientGitHubError(
+                _error(
+                    "github_unavailable",
+                    "GitHub ist momentan nicht erreichbar. Bitte später erneut versuchen.",
+                )
             ) from err
 
     async def _async_bytes(self, url: str) -> bytes | None:
+        path = self._request_path(url)
+        return await self._async_retrying(
+            lambda: self._async_bytes_once(url, path),
+            method="GET",
+            path=path,
+            attempts=RETRY_ATTEMPTS,
+        )
+
+    async def _async_bytes_once(self, url: str, path: str) -> bytes | None:
         session = self._client_session()
         try:
             headers = {**self._headers(), "Accept": "application/vnd.github.raw+json"}
@@ -531,22 +652,31 @@ class GitHubClient:
                 if response.status == 404:
                     return None
                 if response.status >= 400:
-                    self._raise_for_status(response.status, {})
+                    try:
+                        self._raise_for_status("GET", path, response.status, {})
+                    except SyncError as err:
+                        if response.status in RETRY_STATUSES:
+                            raise _TransientGitHubError(err) from err
+                        raise
                 data: bytes = await response.read()
                 return data
         except (TimeoutError, aiohttp.ClientError) as err:
-            raise _error(
-                "github_unavailable",
-                "GitHub ist momentan nicht erreichbar. Bitte später erneut versuchen.",
+            self._log_transport_failure("GET", path, err)
+            raise _TransientGitHubError(
+                _error(
+                    "github_unavailable",
+                    "GitHub ist momentan nicht erreichbar. Bitte später erneut versuchen.",
+                )
             ) from err
 
-    def _raise_for_status(self, status: int, body: Any) -> None:
+    def _raise_for_status(self, method: str, path: str, status: int, body: Any) -> None:
         if status < 400:
             return
         message = ""
         if isinstance(body, dict):
-            message = str(body.get("message", "") or "")
-        _LOGGER.debug("GitHub-Antwort %s: %s", status, message)
+            message = _one_line(body.get("message", ""))
+        # Nur Methode, Pfad, Status und GitHubs Meldung: nie Token oder Payload.
+        _LOGGER.warning("GitHub %s %s → HTTP %s (%s)", method, path, status, message)
         if status in (401, 403):
             raise _error(
                 "github_unauthorized",
@@ -566,10 +696,10 @@ class GitHubClient:
                 "Bitte den Vorgang erneut starten.",
             )
         if status >= 500:
+            detail = f"HTTP {status}: {message}" if message else f"HTTP {status}"
             raise _error(
                 "github_unavailable",
-                "GitHub ist momentan nicht erreichbar (Störung auf der GitHub-Seite). "
-                "Bitte später erneut versuchen.",
+                f"GitHub ist momentan nicht erreichbar ({detail}). Bitte später erneut versuchen.",
             )
         raise _error("github_failed", f"GitHub hat die Anfrage abgelehnt (HTTP {status}).")
 
@@ -680,10 +810,15 @@ class GitHubClient:
         )
         commit_sha = str(commit.get("sha", ""))
         branch = quote(self._settings.dev_branch, safe="")
+        # Der Ref-Update ist der einzige Schritt, der nicht wiederholt werden darf:
+        # ein Retry nach einem verlorenen 2xx könnte den Branch erneut verschieben
+        # und den soeben erzeugten Commit verwaisen lassen. Retries für Blob, Baum
+        # und Commit sind unkritisch (schlimmstenfalls verwaiste Objekte).
         await self._async_json(
             "PATCH",
             self._url(f"git/refs/heads/{branch}"),
             payload={"sha": commit_sha, "force": False},
+            retry=False,
         )
         return commit_sha
 

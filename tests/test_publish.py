@@ -7,6 +7,7 @@ import json
 import logging
 from typing import Any
 
+import aiohttp
 import fake_base
 import pytest
 from fake_facade import FakeFacade, FakeImage, FakeProduct
@@ -26,6 +27,8 @@ from custom_components.frickeldave_store_syncfd.const import (
 )
 from custom_components.frickeldave_store_syncfd.errors import SyncError
 from custom_components.frickeldave_store_syncfd.publish import (
+    RETRY_ATTEMPTS,
+    RETRY_STATUSES,
     FileChange,
     GitHubClient,
     PublishService,
@@ -526,13 +529,16 @@ class FakeHTTPResponse:
 
 
 class FakeHTTPSession:
-    def __init__(self, responses: list[FakeHTTPResponse]) -> None:
+    def __init__(self, responses: list[Any]) -> None:
         self._responses = list(responses)
         self.calls: list[dict[str, Any]] = []
 
     def _next(self, method: str, url: str, **kwargs: Any) -> FakeHTTPResponse:
         self.calls.append({"method": method, "url": url, **kwargs})
-        return self._responses.pop(0)
+        response = self._responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
     def request(self, method: str, url: str, **kwargs: Any) -> FakeHTTPResponse:
         return self._next(method, url, **kwargs)
@@ -544,9 +550,16 @@ class FakeHTTPSession:
         return None
 
 
-def _client(responses: list[FakeHTTPResponse]) -> tuple[GitHubClient, FakeHTTPSession]:
+def _client(
+    responses: list[Any], *, retry_delays: tuple[float, ...] = (0.0, 0.0)
+) -> tuple[GitHubClient, FakeHTTPSession]:
     session = FakeHTTPSession(responses)
-    client = GitHubClient(_settings(), session=session)  # type: ignore[arg-type]
+    # Nullverzögerungen: Tests dürfen für den Retry nicht schlafen.
+    client = GitHubClient(
+        _settings(),
+        session=session,
+        retry_delays=retry_delays,  # type: ignore[arg-type]
+    )
     return client, session
 
 
@@ -651,7 +664,8 @@ async def test_dry_run_reads_chunked_github_responses_end_to_end() -> None:
 async def test_github_errors_map_to_german_codes(
     status: int, body: Any, code: str, fragment: str
 ) -> None:
-    client, _ = _client([FakeHTTPResponse(status, body)])
+    attempts = RETRY_ATTEMPTS if status in RETRY_STATUSES else 1
+    client, _ = _client([FakeHTTPResponse(status, body) for _ in range(attempts)])
 
     with pytest.raises(SyncError) as err:
         await client.async_read_tree()
@@ -693,6 +707,110 @@ async def test_commit_rejects_change_without_artifact() -> None:
         )
 
     assert err.value.code == "publish_artifacts_unavailable"
+
+
+def _read_tree_responses() -> list[FakeHTTPResponse]:
+    return [
+        FakeHTTPResponse(200, {"object": {"sha": "head-1"}}),
+        FakeHTTPResponse(200, {"tree": {"sha": "tree-1"}}),
+        FakeHTTPResponse(200, {"tree": [], "truncated": False}),
+    ]
+
+
+async def test_transient_5xx_is_retried_until_success() -> None:
+    """Regression #289: zwei 503 hintereinander dürfen die Veröffentlichung nicht kippen."""
+
+    client, session = _client(
+        [
+            FakeHTTPResponse(503, {"message": "Service Unavailable"}),
+            FakeHTTPResponse(503, {"message": "Service Unavailable"}),
+            *_read_tree_responses(),
+        ]
+    )
+
+    tree = await client.async_read_tree()
+
+    assert tree.head_sha == "head-1"
+    assert [call["url"].rsplit("/", 1)[-1] for call in session.calls[:3]] == ["dev"] * 3
+    assert len(session.calls) == 5
+
+
+async def test_persistent_5xx_reports_status_and_github_message() -> None:
+    client, session = _client(
+        [FakeHTTPResponse(503, {"message": "Service Unavailable"}) for _ in range(RETRY_ATTEMPTS)]
+    )
+
+    with pytest.raises(SyncError) as err:
+        await client.async_read_tree()
+
+    assert err.value.code == "github_unavailable"
+    assert "HTTP 503: Service Unavailable" in err.value.message
+    assert "Bitte später erneut versuchen." in err.value.message
+    assert len(session.calls) == RETRY_ATTEMPTS, "genau drei Versuche insgesamt"
+
+
+async def test_transport_error_is_retried() -> None:
+    client, session = _client([aiohttp.ClientError("Verbindung verloren"), *_read_tree_responses()])
+
+    tree = await client.async_read_tree()
+
+    assert tree.head_sha == "head-1"
+    assert len(session.calls) == 4
+
+
+async def test_ref_update_is_not_retried_on_5xx() -> None:
+    """Der Ref-Update ist nicht idempotent: genau ein PATCH, kein Retry."""
+
+    client, session = _client(
+        [
+            FakeHTTPResponse(201, {"sha": "blob-new"}),
+            FakeHTTPResponse(201, {"sha": "tree-new"}),
+            FakeHTTPResponse(201, {"sha": "commit-new"}),
+            FakeHTTPResponse(500, {"message": "Internal Server Error"}),
+        ]
+    )
+
+    with pytest.raises(SyncError) as err:
+        await client.async_commit(
+            {CATALOG_PATH: b"{}"},
+            [FileChange(CATALOG_PATH, "changed", "catalog")],
+            head_sha="head",
+            tree_sha="base",
+            message="test",
+        )
+
+    assert err.value.code == "github_unavailable"
+    assert "HTTP 500: Internal Server Error" in err.value.message
+    patches = [call for call in session.calls if call["method"] == "PATCH"]
+    assert len(patches) == 1
+    assert len(session.calls) == 4
+
+
+async def test_5xx_message_is_sanitized_to_one_line_without_token() -> None:
+    noisy = "Server   Error\n\n  bitte warten  " + "ü" * 400
+    client, _ = _client([FakeHTTPResponse(503, {"message": noisy}) for _ in range(RETRY_ATTEMPTS)])
+
+    with pytest.raises(SyncError) as err:
+        await client.async_read_tree()
+
+    message = err.value.message
+    assert message.startswith("GitHub ist momentan nicht erreichbar (HTTP 503: Server Error")
+    assert "\n" not in message
+    # Detail hoechstens MAX_ERROR_DETAIL_LENGTH (200) Zeichen, alles in einer Zeile.
+    detail = message.split("HTTP 503: ", 1)[1].split("). Bitte", 1)[0]
+    assert len(detail) == 200
+    assert TOKEN not in message
+
+
+async def test_5xx_without_message_reports_status_only() -> None:
+    client, _ = _client(
+        [FakeHTTPResponse(504, b"<html>Gateway Timeout</html>") for _ in range(RETRY_ATTEMPTS)]
+    )
+
+    with pytest.raises(SyncError) as err:
+        await client.async_read_tree()
+
+    assert "(HTTP 504)" in err.value.message
 
 
 # --------------------------------------------------------------------------- Feature
@@ -832,4 +950,4 @@ def test_settings_use_the_frickeldave_defaults() -> None:
     assert settings.prod_branch == "main"
     assert settings.prod_workflow == "fd-deploy-prd.yml"
     assert settings.catalog_url == "https://frickeldave.de/data/handmade.json"
-    assert VERSION == "0.1.0"
+    assert VERSION == "0.1.1"
