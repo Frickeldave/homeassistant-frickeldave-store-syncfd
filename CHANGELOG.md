@@ -8,6 +8,14 @@ Alle nennenswerten Änderungen dieser Integration. Das Format orientiert sich an
 
 ### Fixed
 
+- **Prod meldet und startet ohne Änderungen kein Deployment mehr (#289).**
+  `deployment.would_trigger` richtet sich jetzt für beide Ziele ausschließlich nach
+  den Dateiänderungen des Berichts; für `prod` ist es nicht länger fest auf `true`
+  gesetzt. Ohne neue, geänderte oder entfernte Dateien wird
+  `fd-deploy-prd.yml` auch beim echten Veröffentlichen nicht mehr ausgelöst, es
+  entsteht kein Commit, und die Zusammenfassung nennt „Keine Änderungen: nichts
+  committet, kein Deployment ausgelöst.“ Der Workflow läuft nur noch, wenn es
+  tatsächlich etwas zu promoten gibt.
 - **Ein 404 beim Prod-Workflow nennt jetzt Workflow, Branch und Token-Recht (#289).**
   Antwortet GitHub auf `POST actions/workflows/<workflow>/run` mit 404, nennt die
   Meldung den konfigurierten Workflow und Produktionsbranch sowie die
