@@ -245,6 +245,13 @@ def _summary_with_warning(summary: str, warning: str | None) -> str:
     return f"{summary} Hinweis: {warning}" if warning else summary
 
 
+def _has_changes(counts: dict[str, int]) -> bool:
+    """Der Bericht enthält genau dann Änderungen, wenn Dateien hinzukommen,
+    wechseln oder verschwinden."""
+
+    return bool(counts[STATUS_ADDED] or counts[STATUS_CHANGED] or counts[STATUS_REMOVED])
+
+
 def _require_complete_tree(tree: RemoteTree) -> None:
     """Abgeschnittene Bäume verfälschen jeden Vergleich."""
 
@@ -1026,6 +1033,7 @@ class PublishService:
                 dev_tree = report_tree
             changes = diff_artifacts(artifacts, report_tree.blobs)
             counts = _status_counts(changes)
+            has_changes = _has_changes(counts)
             dev_changes = changes if target != "prod" else diff_artifacts(artifacts, dev_tree.blobs)
 
             # Löschschutz: Absolut- und Anteilsgrenze gelten gemeinsam. Im Dry-Run
@@ -1110,18 +1118,24 @@ class PublishService:
                 )
 
             if target == "prod":
-                await client.async_dispatch_workflow(
-                    settings.prod_workflow,
-                    ref=settings.prod_branch,
-                    inputs={"dry_run": False},
-                )
-                result["deployment"].update(
-                    {
-                        "triggered": True,
-                        "workflow_run": True,
-                        "mode": "workflow_dispatch",
-                    }
-                )
+                # Ohne Änderung gegenüber main gibt es nichts zu promoten, also auch
+                # keinen Workflow-Lauf und keinen Commit im Ergebnis.
+                if has_changes:
+                    await client.async_dispatch_workflow(
+                        settings.prod_workflow,
+                        ref=settings.prod_branch,
+                        inputs={"dry_run": False},
+                    )
+                    result["deployment"].update(
+                        {
+                            "triggered": True,
+                            "workflow_run": True,
+                            "mode": "workflow_dispatch",
+                        }
+                    )
+                else:
+                    result["deployment"]["triggered"] = False
+                    commit_sha = None
             else:
                 result["deployment"]["triggered"] = commit_sha is not None
             result["commit"] = commit_sha
@@ -1161,12 +1175,7 @@ class PublishService:
         files = changes[:MAX_CHANGE_ENTRIES]
         deployment = {
             "triggered": False,
-            "would_trigger": bool(
-                target == "prod"
-                or counts[STATUS_ADDED]
-                or counts[STATUS_CHANGED]
-                or counts[STATUS_REMOVED]
-            ),
+            "would_trigger": _has_changes(counts),
             "mode": "workflow_dispatch" if target == "prod" else "push",
             "workflow": settings.prod_workflow if target == "prod" else DEFAULT_DEV_WORKFLOW,
             "branch": settings.prod_branch if target == "prod" else settings.dev_branch,
@@ -1225,6 +1234,7 @@ class PublishService:
             f"{counts['added']} Dateien neu, {counts['changed']} geändert, "
             f"{counts['removed']} entfernt, {counts['unchanged']} unverändert"
         )
+        has_changes = _has_changes(counts)
         parts = [
             f"{_describe(product_counts, 'Produkte')} ({product_counts['total']} gesamt)",
             f"{_describe(image_counts, 'Bilder')} ({image_counts['total']} gesamt)",
@@ -1232,6 +1242,13 @@ class PublishService:
         ]
         if dry_run:
             if target == "prod":
+                if not has_changes:
+                    parts.append(
+                        f"Vergleichsbasis: {compare_branch}. Dry-Run: Es wird nichts "
+                        f"geschrieben. Keine Änderungen: {settings.prod_workflow} würde "
+                        "nicht ausgelöst."
+                    )
+                    return "; ".join(parts) + "."
                 parts.append(
                     f"Vergleichsbasis: {compare_branch}. Dry-Run: Es wird nichts "
                     "geschrieben. Beim Veröffentlichen würde zuerst ein Commit auf "
@@ -1247,6 +1264,12 @@ class PublishService:
                 )
             return "; ".join(parts) + "."
         if target == "prod":
+            if not has_changes:
+                return (
+                    "; ".join(parts)
+                    + f". Vergleichsbasis: {compare_branch}. Keine Änderungen: nichts "
+                    "committet, kein Deployment ausgelöst."
+                )
             prefix = (
                 f"Commit auf {settings.dev_branch} gepusht"
                 if committed

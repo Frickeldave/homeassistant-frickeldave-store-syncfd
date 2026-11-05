@@ -260,6 +260,7 @@ async def test_dry_run_with_identical_remote_reports_unchanged_products() -> Non
         "total": product_total,
     }
     assert {item["status"] for item in result["files"]} == {"unchanged"}
+    assert result["deployment"]["would_trigger"] is False
 
 
 async def test_dry_run_with_changed_catalog_reports_changed_products() -> None:
@@ -330,6 +331,7 @@ async def test_publish_dev_commits_once_and_is_idempotent() -> None:
     assert second["changed"] is False
     assert second["commit"] is None
     assert second["deployment"]["triggered"] is False
+    assert second["deployment"]["would_trigger"] is False
     assert len(fake.commits) == 1, "unveränderter Stand darf keinen zweiten Commit erzeugen"
     assert "Keine Änderungen" in second["summary"]
 
@@ -353,7 +355,7 @@ async def test_publish_prod_commits_to_dev_then_dispatches_deploy_prd() -> None:
 
     again = await service.async_publish("prod")
     assert again["changed"] is False
-    assert len(fake.dispatches) == 2, "Produktion darf auch ohne Dateiänderung promoten"
+    assert len(fake.dispatches) == 2, "main ist im Fake weiterhin leer: erneut Dispatch"
 
 
 async def test_publish_prod_dry_run_compares_against_the_prod_branch() -> None:
@@ -393,6 +395,8 @@ async def test_publish_prod_with_current_dev_skips_commit_but_dispatches() -> No
     assert fake.remote == _remote_matching(artifacts), "dev-Ref bleibt unverändert"
     assert result["commit"] is None
     assert result["changed"] is False
+    assert result["deployment"]["would_trigger"] is True
+    assert result["deployment"]["triggered"] is True
     assert len(fake.dispatches) == 1
     assert fake.dispatches[0]["ref"] == "main"
     assert result["counts"]["added"] == len(artifacts), "Bericht zeigt das Prod-Delta"
@@ -400,6 +404,53 @@ async def test_publish_prod_with_current_dev_skips_commit_but_dispatches() -> No
     assert "Keine Dateiänderungen auf dev" in result["summary"]
     assert "Vergleichsbasis: main" in result["summary"]
     assert "fd-deploy-prd.yml wurde ausgelöst" in result["summary"]
+
+
+async def test_publish_prod_dry_run_without_changes_reports_no_deployment() -> None:
+    """Regression #289: gleicher Stand wie main ⇒ kein Deployment im Plan."""
+
+    facade = _facade()
+    artifacts = await _artifacts(facade)
+    matching = _remote_matching(artifacts)
+    fake = FakeGitHub(remote=matching, prod_remote=matching)
+    service = _service(facade, fake)
+
+    result = await service.async_publish("prod", dry_run=True)
+
+    assert result["counts"] == {
+        "added": 0,
+        "changed": 0,
+        "removed": 0,
+        "unchanged": len(artifacts),
+        "total": len(artifacts),
+    }
+    assert result["deployment"]["would_trigger"] is False
+    assert result["deployment"]["triggered"] is False
+    assert fake.commits == []
+    assert fake.dispatches == []
+    assert "würde nicht ausgelöst" in result["summary"]
+    assert "würde zuerst ein Commit" not in result["summary"]
+
+
+async def test_publish_prod_without_changes_skips_commit_and_dispatch() -> None:
+    """Regression #289: ohne Änderung kein Commit und kein Workflow-Lauf."""
+
+    facade = _facade()
+    artifacts = await _artifacts(facade)
+    matching = _remote_matching(artifacts)
+    fake = FakeGitHub(remote=matching, prod_remote=matching)
+    service = _service(facade, fake)
+
+    result = await service.async_publish("prod")
+
+    assert fake.commits == []
+    assert fake.dispatches == [], "kein actions/workflows/.../run ohne Änderung"
+    assert result["commit"] is None
+    assert result["changed"] is False
+    assert result["deployment"]["triggered"] is False
+    assert result["deployment"]["would_trigger"] is False
+    assert "Keine Änderungen: nichts committet, kein Deployment ausgelöst." in result["summary"]
+    assert "fd-deploy-prd.yml" not in result["summary"]
 
 
 async def test_publish_prod_commits_on_dev_when_dev_also_lacks_content() -> None:
@@ -1231,4 +1282,4 @@ def test_settings_use_the_frickeldave_defaults() -> None:
     assert settings.prod_branch == "main"
     assert settings.prod_workflow == "fd-deploy-prd.yml"
     assert settings.catalog_url == "https://frickeldave.de/data/handmade.json"
-    assert VERSION == "0.1.4"
+    assert VERSION == "0.1.5"
