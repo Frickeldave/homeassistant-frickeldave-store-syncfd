@@ -37,7 +37,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Protocol, TypeVar
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import aiohttp
 
@@ -119,6 +119,63 @@ def _one_line(value: Any, *, limit: int = MAX_ERROR_DETAIL_LENGTH) -> str:
     """Text auf eine Zeile und ``limit`` Zeichen begrenzen (Logs, Meldungen)."""
 
     return " ".join(str(value or "").split())[:limit].strip()
+
+
+#: Pfadmarker für 404-Meldungen (Issue #289).
+_DISPATCH_PATH_MARKER: Final = "/actions/workflows/"
+_REF_PATH_MARKERS: Final = ("/git/ref/", "/git/refs/")
+
+
+def _with_leading_slash(path: str) -> str:
+    """Pfad normalisieren: ``_request_path`` liefert ihn ohne führenden Slash."""
+
+    return "/" + path.lstrip("/")
+
+
+def _safe_label(value: Any, fallback: str) -> str:
+    """Konfigurationswert einzeilig und begrenzt in eine Meldung übernehmen."""
+
+    return _one_line(value) or fallback
+
+
+def _branch_from_ref_path(path: str) -> str:
+    """Branch aus ``git/ref/heads/<branch>`` lesen statt ihn zu raten."""
+
+    normalised = _with_leading_slash(path)
+    for marker in _REF_PATH_MARKERS:
+        index = normalised.find(marker)
+        if index < 0:
+            continue
+        remainder = unquote(normalised[index + len(marker) :]).strip("/")
+        for namespace in ("heads/", "tags/"):
+            if remainder.startswith(namespace):
+                remainder = remainder[len(namespace) :]
+                break
+        return _one_line(remainder)
+    return ""
+
+
+def _dispatch_not_found_message(workflow: str, branch: str) -> str:
+    """404 beim Workflow-Dispatch: Workflow, Branch und Token-Recht nennen."""
+
+    name = _safe_label(workflow, "(nicht konfiguriert)")
+    target = _safe_label(branch, "(nicht konfiguriert)")
+    return (
+        f"Der Workflow „{name}“ wurde auf Branch „{target}“ nicht gefunden (HTTP 404). "
+        "Bitte Workflow-Name und Branch prüfen; bei korrekten Werten fehlt dem Token "
+        "meist das Recht „Actions: Read and write“."
+    )
+
+
+def _ref_not_found_message(repository: str, branch: str) -> str:
+    """404 auf ``git/ref``: Repository, Branch und Contents-Recht nennen."""
+
+    repo = _safe_label(repository, "(nicht konfiguriert)")
+    target = _safe_label(branch, "(nicht bekannt)")
+    return (
+        f"Repository „{repo}“ oder Branch „{target}“ nicht gefunden (HTTP 404). "
+        "Bitte Branch-Namen und das Token-Recht „Contents: Read and write“ prüfen."
+    )
 
 
 class _TransientGitHubError(Exception):
@@ -712,11 +769,7 @@ class GitHubClient:
                 f"„{self._settings.repository}“.",
             )
         if status == 404:
-            raise _error(
-                "github_not_found",
-                f"Repository „{self._settings.repository}“ oder Branch nicht gefunden. "
-                "Bitte Repository und Token prüfen.",
-            )
+            raise _error("github_not_found", self._not_found_message(path))
         if status in (409, 422):
             raise _error(
                 "github_conflict",
@@ -730,6 +783,23 @@ class GitHubClient:
                 f"GitHub ist momentan nicht erreichbar ({detail}). Bitte später erneut versuchen.",
             )
         raise _error("github_failed", f"GitHub hat die Anfrage abgelehnt (HTTP {status}).")
+
+    def _not_found_message(self, path: str) -> str:
+        """404 einordnen: Workflow-Dispatch, Git-Ref oder generisch (Issue #289)."""
+
+        normalised = _with_leading_slash(path)
+        if _DISPATCH_PATH_MARKER in normalised and normalised.endswith("/run"):
+            return _dispatch_not_found_message(
+                self._settings.prod_workflow, self._settings.prod_branch
+            )
+        if any(marker in normalised for marker in _REF_PATH_MARKERS):
+            return _ref_not_found_message(
+                self._settings.repository, _branch_from_ref_path(normalised)
+            )
+        return (
+            f"Repository „{self._settings.repository}“ oder Branch nicht gefunden. "
+            "Bitte Repository und Token prüfen."
+        )
 
     # ------------------------------------------------------------------ Lesen
     async def async_read_tree(self, branch: str | None = None) -> RemoteTree:
