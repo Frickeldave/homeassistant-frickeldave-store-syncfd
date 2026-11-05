@@ -99,7 +99,7 @@ def test_manifest_matches_constants() -> None:
 
     assert manifest["domain"] == DOMAIN
     assert manifest["name"] == NAME
-    assert manifest["version"] == VERSION == "0.1.3"
+    assert manifest["version"] == VERSION == "0.1.4"
     assert project["version"] == VERSION
     assert hacs["name"] == NAME
 

@@ -900,6 +900,61 @@ async def test_github_errors_map_to_german_codes(
     assert fragment in err.value.message
 
 
+async def test_dispatch_404_names_workflow_branch_and_actions_permission() -> None:
+    session = FakeHTTPSession([FakeHTTPResponse(404, {"message": "Not Found"})])
+    client = GitHubClient(
+        _settings(prod_workflow="release-prd.yml", prod_branch="production"),
+        session=session,  # type: ignore[arg-type]
+        retry_delays=(0.0,),
+    )
+
+    with pytest.raises(SyncError) as err:
+        await client.async_dispatch_workflow(
+            "release-prd.yml", ref="production", inputs={"dry_run": False}
+        )
+
+    assert err.value.code == "github_not_found"
+    message = err.value.message
+    assert "release-prd.yml" in message
+    assert "production" in message
+    assert "Actions: Read and write" in message
+    assert "fd-deploy-prd.yml" not in message
+    assert TOKEN not in message
+
+
+async def test_ref_404_names_repository_and_branch_from_path() -> None:
+    client, _ = _client([FakeHTTPResponse(404, {"message": "Not Found"})])
+
+    with pytest.raises(SyncError) as err:
+        await client.async_read_tree("release/2026")
+
+    assert err.value.code == "github_not_found"
+    message = err.value.message
+    assert "Frickeldave/frickeldave.github.io" in message
+    assert "release/2026" in message
+    assert "Contents: Read and write" in message
+    assert TOKEN not in message
+
+
+async def test_blob_404_keeps_the_generic_repository_message() -> None:
+    client, _ = _client([FakeHTTPResponse(404, {"message": "Not Found"})])
+
+    with pytest.raises(SyncError) as err:
+        await client.async_commit(
+            {CATALOG_PATH: b"{}"},
+            [FileChange(CATALOG_PATH, "changed", "catalog")],
+            head_sha="head",
+            tree_sha="base-tree",
+            message="test",
+        )
+
+    assert err.value.code == "github_not_found"
+    assert err.value.message == (
+        "Repository „Frickeldave/frickeldave.github.io“ oder Branch nicht gefunden. "
+        "Bitte Repository und Token prüfen."
+    )
+
+
 async def test_github_html_success_is_structured_not_a_crash() -> None:
     client, _ = _client([FakeHTTPResponse(200, b"<html>Captive Portal</html>")])
 
@@ -1176,4 +1231,4 @@ def test_settings_use_the_frickeldave_defaults() -> None:
     assert settings.prod_branch == "main"
     assert settings.prod_workflow == "fd-deploy-prd.yml"
     assert settings.catalog_url == "https://frickeldave.de/data/handmade.json"
-    assert VERSION == "0.1.3"
+    assert VERSION == "0.1.4"

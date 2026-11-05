@@ -8,6 +8,14 @@ Alle nennenswerten Änderungen dieser Integration. Das Format orientiert sich an
 
 ### Fixed
 
+- **Ein 404 beim Prod-Workflow nennt jetzt Workflow, Branch und Token-Recht (#289).**
+  Antwortet GitHub auf `POST actions/workflows/<workflow>/run` mit 404, nennt die
+  Meldung den konfigurierten Workflow und Produktionsbranch sowie die
+  wahrscheinlichsten Ursachen (falscher Workflow-Name oder Branch, fehlendes
+  Recht „Actions: Read and write“) — statt pauschal „Repository oder Branch nicht
+  gefunden“. Ein 404 auf `git/ref(s)` nennt Repository, den Branch aus dem Pfad und
+  das Recht „Contents: Read and write“; andere 404-Antworten behalten die
+  bisherige Meldung.
 - **Prod-Dry-Run vergleicht jetzt gegen `main` (#289).**
   Der Bericht für „Nach Prod veröffentlichen“ liest den Dateibaum und den
   Katalog des Produktionsbranchs (`main`) statt immer `dev`; Zähler, Produkte,
