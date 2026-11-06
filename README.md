@@ -7,7 +7,7 @@ ausschließlich über den Erweiterungspunkt der Basis-Integration
 `frickeldave_store` und enthält selbst keine Store-Daten, keine Bilder und keine
 Dateipfade der Basis.
 
-## Funktionsumfang (0.1.0)
+## Funktionsumfang (0.1.6)
 
 | Fähigkeit | Rolle | Was sie tut |
 | --- | --- | --- |
@@ -31,7 +31,7 @@ Die Basis-Integration **`frickeldave_store`** ist Pflicht. Sie liefert Store,
 Bilder, Rechte, Snapshots und die Fassade, gegen die diese Erweiterung arbeitet,
 und muss zuerst installiert und eingerichtet sein:
 
-- Repository: <https://github.com/Frickeldave/frickeldave.home.net>
+- Repository: <https://github.com/Frickeldave/homeassistant-frickeldave-store>
 - Benötigter Erweiterungspunkt: Contract `1` (Feld `dependencies` im Manifest)
 
 HACS löst keine Abhängigkeiten zwischen Integrationen auf. Ist die Basis nicht
@@ -91,6 +91,39 @@ Mehr Rechte braucht die Erweiterung nicht. Der alte Token aus der Basis wird
 **nicht** übernommen: Nach dem Update auf die Erweiterung einen neuen Token
 anlegen, hier eintragen und den alten widerrufen.
 
+## Veröffentlichen: dev und prod
+
+`publish` schreibt ausschließlich auf `dev`. Ein Produktions-Publish committet
+zuerst, was auf `dev` noch fehlt, und stößt danach `fd-deploy-prd.yml` an.
+Dieser Workflow lässt `fd-ci` auf `dev` laufen, befördert `dev` nach `main` und
+deployt die Pages. **Ein Prod-Publish committet also ebenfalls auf `dev`; ein
+separater Dev-Publish ist nicht nötig.** Die Vorschau auf `dev` aktualisiert
+sich durch diesen Push automatisch.
+
+| Ziel | Vergleichsbasis | Commit auf | Was läuft |
+| --- | --- | --- | --- |
+| `dev` | `dev` | `dev` | `fd-ci` und `fd-deploy-dev` |
+| `prod` | `main` | `dev` | `fd-deploy-prd.yml` (CI, Merge, Pages) |
+
+Die Vergleichsbasis bestimmt, was sich in der Produktion ändern würde: `prod`
+vergleicht gegen `main`, `dev` gegen `dev`. Der Commit landet in beiden Fällen
+auf `dev`; `main` beschreibt nur der Workflow.
+
+Ein Release (Tag und GitHub-Release) entsteht nur, wenn die Website-Version in
+`package.json` höher ist als das letzte stabile Release. Reine Katalog- und
+deploy-neutrale Änderungen werden ohne Release deployt, die Version im Footer
+bleibt gleich.
+
+Deploy-neutral sind etwa `docs/**`, `.squad/**`, `.github/**`, `CHANGELOG` und
+Tooling-Konfigurationen; sie werden zusammen mit dem Katalog befördert.
+**Seitenrelevante** Änderungen – `src/**`, `public/**` außer dem Katalog,
+Build-Konfigurationen, `scripts/build-*` und `scripts/install-*`,
+`package.json` samt Lockfile – brauchen weiterhin einen Versions-Bump. Ohne ihn
+meldet die Promotion „nichts zu promoten" und führt keinen Merge aus.
+
+Gibt es gegenüber dem Zielbranch überhaupt keine Änderung, entstehen weder
+Commit noch Workflow-Lauf – unabhängig vom Ziel.
+
 ## Feature-Vertrag
 
 Die Payloads sind identisch zu den bisherigen Endpunkten der Basis; das Panel
@@ -108,6 +141,14 @@ Antwort (`200`): `target`, `dry_run`, `repository`, `branch`, `commit`,
 `changed`, `counts` (`added`/`changed`/`removed`/`unchanged`/`total`),
 `products`, `images`, `files`, `files_truncated`, `deployment`,
 `removal_guard`, `warning`, `summary`.
+
+`target: dev` vergleicht gegen `dev` und committet dorthin; der Push löst
+`fd-ci` und `fd-deploy-dev` aus. `target: prod` vergleicht gegen `main`,
+committet die dort noch fehlenden Änderungen auf `dev` und löst danach
+`fd-deploy-prd.yml` über
+`POST /repos/{repo}/actions/workflows/{workflow}/dispatches` auf `main` aus.
+Ohne Änderungen entstehen weder Commit noch Workflow-Lauf. Details im Abschnitt
+[Veröffentlichen: dev und prod](#veröffentlichen-dev-und-prod).
 
 Der Löschschutz blockiert mehr als 10 entfernte Bilder oder mehr als ein Drittel
 des Bildbestands; ein Dry-Run zeigt den Plan mit Warnung, ein echter Lauf
