@@ -8,6 +8,13 @@ Alle nennenswerten Änderungen dieser Integration. Das Format orientiert sich an
 
 ### Fixed
 
+- **Prod-Dispatch ruft jetzt den richtigen GitHub-Endpoint auf (#289).**
+  `GitHubClient.async_dispatch_workflow` postete auf
+  `actions/workflows/<workflow>/run` — diesen Pfad kennt die GitHub-API nicht, sie
+  antwortet dort mit 404. Der Dispatch geht jetzt an
+  `POST actions/workflows/<workflow>/dispatches`, sodass „Nach Prod
+  veröffentlichen“ `fd-deploy-prd.yml` wieder auslöst. Der 404-Fallback nennt
+  weiterhin Workflow, Branch und den Hinweis auf „Actions: Read and write“.
 - **Prod meldet und startet ohne Änderungen kein Deployment mehr (#289).**
   `deployment.would_trigger` richtet sich jetzt für beide Ziele ausschließlich nach
   den Dateiänderungen des Berichts; für `prod` ist es nicht länger fest auf `true`
@@ -17,7 +24,7 @@ Alle nennenswerten Änderungen dieser Integration. Das Format orientiert sich an
   committet, kein Deployment ausgelöst.“ Der Workflow läuft nur noch, wenn es
   tatsächlich etwas zu promoten gibt.
 - **Ein 404 beim Prod-Workflow nennt jetzt Workflow, Branch und Token-Recht (#289).**
-  Antwortet GitHub auf `POST actions/workflows/<workflow>/run` mit 404, nennt die
+  Antwortet GitHub auf `POST actions/workflows/<workflow>/dispatches` mit 404, nennt die
   Meldung den konfigurierten Workflow und Produktionsbranch sowie die
   wahrscheinlichsten Ursachen (falscher Workflow-Name oder Branch, fehlendes
   Recht „Actions: Read and write“) — statt pauschal „Repository oder Branch nicht

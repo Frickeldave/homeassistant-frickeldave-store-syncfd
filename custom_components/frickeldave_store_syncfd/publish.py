@@ -123,6 +123,7 @@ def _one_line(value: Any, *, limit: int = MAX_ERROR_DETAIL_LENGTH) -> str:
 
 #: Pfadmarker für 404-Meldungen (Issue #289).
 _DISPATCH_PATH_MARKER: Final = "/actions/workflows/"
+_DISPATCH_PATH_SUFFIX: Final = "/dispatches"
 _REF_PATH_MARKERS: Final = ("/git/ref/", "/git/refs/")
 
 
@@ -795,7 +796,7 @@ class GitHubClient:
         """404 einordnen: Workflow-Dispatch, Git-Ref oder generisch (Issue #289)."""
 
         normalised = _with_leading_slash(path)
-        if _DISPATCH_PATH_MARKER in normalised and normalised.endswith("/run"):
+        if _DISPATCH_PATH_MARKER in normalised and normalised.endswith(_DISPATCH_PATH_SUFFIX):
             return _dispatch_not_found_message(
                 self._settings.prod_workflow, self._settings.prod_branch
             )
@@ -931,9 +932,11 @@ class GitHubClient:
     async def async_dispatch_workflow(
         self, workflow: str, *, ref: str, inputs: dict[str, Any]
     ) -> None:
+        # GitHub kennt nur ``POST actions/workflows/<workflow>/dispatches``;
+        # ``/run`` existiert nicht und antwortet mit 404 (Issue #289).
         await self._async_json(
             "POST",
-            self._url(f"actions/workflows/{quote(workflow, safe='')}/run"),
+            self._url(f"actions/workflows/{quote(workflow, safe='')}/dispatches"),
             payload={"ref": ref, "inputs": inputs},
         )
 

@@ -444,7 +444,7 @@ async def test_publish_prod_without_changes_skips_commit_and_dispatch() -> None:
     result = await service.async_publish("prod")
 
     assert fake.commits == []
-    assert fake.dispatches == [], "kein actions/workflows/.../run ohne Änderung"
+    assert fake.dispatches == [], "kein actions/workflows/.../dispatches ohne Änderung"
     assert result["commit"] is None
     assert result["changed"] is False
     assert result["deployment"]["triggered"] is False
@@ -951,6 +951,22 @@ async def test_github_errors_map_to_german_codes(
     assert fragment in err.value.message
 
 
+async def test_dispatch_uses_the_dispatches_endpoint_for_prod() -> None:
+    """Regression #289: ``/run`` existiert nicht; GitHub erwartet ``/dispatches``."""
+
+    client, session = _client([FakeHTTPResponse(204, None)])
+
+    await client.async_dispatch_workflow("fd-deploy-prd.yml", ref="main", inputs={"dry_run": False})
+
+    base = "https://api.github.com/repos/Frickeldave/frickeldave.github.io"
+    assert len(session.calls) == 1, "genau ein Dispatch, kein zusätzlicher Request"
+    call = session.calls[0]
+    assert call["method"] == "POST"
+    assert call["url"] == f"{base}/actions/workflows/fd-deploy-prd.yml/dispatches"
+    assert call["json"] == {"ref": "main", "inputs": {"dry_run": False}}
+    assert "/run" not in call["url"]
+
+
 async def test_dispatch_404_names_workflow_branch_and_actions_permission() -> None:
     session = FakeHTTPSession([FakeHTTPResponse(404, {"message": "Not Found"})])
     client = GitHubClient(
@@ -969,8 +985,11 @@ async def test_dispatch_404_names_workflow_branch_and_actions_permission() -> No
     assert "release-prd.yml" in message
     assert "production" in message
     assert "Actions: Read and write" in message
+    assert "Workflow-Name und Branch prüfen" in message
     assert "fd-deploy-prd.yml" not in message
     assert TOKEN not in message
+    # Der aufgerufene Pfad ist der Dispatch-Endpoint, nicht das alte ``/run``.
+    assert session.calls[0]["url"].endswith("/actions/workflows/release-prd.yml/dispatches")
 
 
 async def test_ref_404_names_repository_and_branch_from_path() -> None:
@@ -1282,4 +1301,4 @@ def test_settings_use_the_frickeldave_defaults() -> None:
     assert settings.prod_branch == "main"
     assert settings.prod_workflow == "fd-deploy-prd.yml"
     assert settings.catalog_url == "https://frickeldave.de/data/handmade.json"
-    assert VERSION == "0.1.5"
+    assert VERSION == "0.1.6"
